@@ -264,6 +264,10 @@ Caller overrides are saved in the optional `sandbox.caller_config_overrides` col
 
 Rebuilds now preserve explicit settings and clears. Use builder setters, `overlay()`, or modification APIs: saved overrides can overwrite direct edits to a resolved `SandboxConfig`.
 
+Incomplete local creates use the additive `m20261023_000001_sandbox_creation` migration. `sandbox_creation` retains the sandbox identity and the originating PID for diagnostics; `sandbox_creation_volume` retains the exact newly provisioned named-volume identities. Cleanup removes files before deleting these records, the owned volume rows, and the sandbox row in one transaction. Preexisting volumes are not included. A trigger prevents restarting an incomplete sandbox, and foreign keys prevent prematurely deleting its catalog owners. Downgrade refuses while creation records remain; explicitly remove or replace incomplete sandboxes first. Preparation uses a separate `.creation.lock` beside the existing transition lock. Filesystem workers retain that lock after task cancellation, and recovery tests lock ownership rather than PID liveness. Successful creation publishes `Running`, restores the requested ephemeral flag, and retires recovery ownership in one transaction after validation.
+
+The existing unknown-migration admission rule still applies: older SDKs and CLIs refuse to reopen this upgraded home. Use a supporting SDK and CLI, a supported downgrade, or a separate `MSB_HOME`. Already-running older VMs retain their existing sandbox/run tables and SQL; their continued operation must be validated separately from catalog reopening. No stop-all-sandboxes upgrade gate is added. The recovery ordering covers launcher/process interruption; it does not strengthen the catalog's existing host-power-loss durability settings.
+
 ## 7. Home and Runtime Path Layout
 
 Directory names under `MSB_HOME` and the runtime directory are durable locators used by binaries from different releases. This includes the database, cache, sandboxes, volumes, snapshots, logs, secrets, TLS material, SSH state, sockets, locks, journals, and configuration files.

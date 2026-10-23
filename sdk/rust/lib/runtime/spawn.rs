@@ -31,7 +31,9 @@ use std::{
 
 #[cfg(windows)]
 use rand::Rng;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set, Statement,
+};
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 #[cfg(windows)]
@@ -75,6 +77,8 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
 #[cfg(feature = "net")]
 use super::network_slot::NetworkSlot;
+use crate::backend::local::creation;
+use crate::backend::local::creation::require_volume_available;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 #[cfg(windows)]
@@ -430,11 +434,9 @@ pub async fn spawn_sandbox(
         &config.spec.name,
     )?;
 
-    // Create directories concurrently.
-    tokio::try_join!(
-        tokio::fs::create_dir_all(&log_dir),
-        tokio::fs::create_dir_all(&scripts_dir),
-    )?;
+    // Complete namespace mutations before yielding; a cancelled future must not publish late.
+    std::fs::create_dir_all(&log_dir)?;
+    std::fs::create_dir_all(&scripts_dir)?;
 
     // Stopped-safe preparation: a `--next-start` upper grow persists only the
     // desired size, so the file itself grows here, before any virtio device
@@ -453,9 +455,9 @@ pub async fn spawn_sandbox(
             crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
         })?;
         let script_path = scripts_dir.join(safe_name);
-        tokio::fs::write(&script_path, content).await?;
+        std::fs::write(&script_path, content)?;
         #[cfg(unix)]
-        tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
         #[cfg(windows)]
         microsandbox_filesystem::PassthroughFs::set_path_virtual_permissions(
             &runtime_dir,
@@ -1210,7 +1212,7 @@ async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> Micros
         _ => None,
     };
     let runtime_dir = sandbox_dir.join("runtime");
-    let handled = tokio::task::spawn_blocking(move || {
+    let handled = creation::spawn_blocking(move || {
         microsandbox_runtime::checkpoint::recover_stopped_root_growth(&runtime_dir)?;
         match desired_mib {
             Some(desired) => microsandbox_runtime::checkpoint::grow_stopped_root(
@@ -1666,6 +1668,8 @@ async fn ensure_named_volumes_inner(
             .await?;
 
         if let Some(existing) = existing {
+            require_volume_available(pools.read(), existing.id, Some(&config.spec.name)).await?;
+
             match create.mode() {
                 NamedVolumeMode::Create => {
                     return Err(MicrosandboxError::VolumeAlreadyExists(
@@ -1715,17 +1719,47 @@ async fn ensure_named_volumes_inner(
             updated_at: Set(Some(now)),
             ..Default::default()
         };
-        let inserted = volume_entity::Entity::insert(model)
-            .exec(pools.write())
+        // The volume row and its create ownership commit together, before provisioning files.
+        // A crash cannot make a newly-created volume look like a preexisting shared volume.
+        let owner = pools
+            .write()
+            .query_one_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "SELECT sandbox.id FROM sandbox \
+            JOIN sandbox_creation ON sandbox.id = sandbox_creation.sandbox_id \
+            WHERE sandbox.name = ?",
+                [config.spec.name.clone().into()],
+            ))
+            .await?
+            .map(|row| row.try_get::<i32>("", "id"))
+            .transpose()?;
+
+        let volume_id = pools
+            .write()
+            .transaction(|txn| {
+                let model = model.clone();
+
+                async move {
+                    let inserted = volume_entity::Entity::insert(model).exec(&txn).await?;
+                    let volume_id = inserted.last_insert_id;
+                    if let Some(owner) = owner {
+                        txn.execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Sqlite,
+                        "INSERT INTO sandbox_creation_volume (volume_id, sandbox_id) VALUES (?, ?)",
+                        [volume_id.into(), owner.into()],
+                    )).await?;
+                    }
+                    Ok::<_, MicrosandboxError>((txn, volume_id))
+                }
+            })
             .await?;
-        let volume_id = inserted.last_insert_id;
 
         let path = local.volume_path(&volume_config.name);
         if let Err(err) = materialize_volume_path(&volume_config, &path).await {
             let _ = volume_entity::Entity::delete_by_id(volume_id)
                 .exec(pools.write())
                 .await;
-            let _ = tokio::fs::remove_dir_all(&path).await;
+            let _ = std::fs::remove_dir_all(&path);
             return Err(err);
         }
         created.push(CreatedNamedVolume {
@@ -1753,7 +1787,7 @@ async fn rollback_created_named_volume_records(
     }
 
     for volume in volumes {
-        let _ = tokio::fs::remove_dir_all(&volume.path).await;
+        let _ = std::fs::remove_dir_all(&volume.path);
     }
 
     let ids = volumes.iter().map(|volume| volume.id).collect::<Vec<_>>();
@@ -1825,6 +1859,8 @@ async fn resolve_named_volumes(
             .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.clone()))?;
 
         let kind = VolumeKind::from_db_value(&model.kind);
+        require_volume_available(pools.read(), model.id, Some(&config.spec.name)).await?;
+
         let path = local.volume_path(name);
         let volume = match kind {
             VolumeKind::Directory => ResolvedNamedVolume {
