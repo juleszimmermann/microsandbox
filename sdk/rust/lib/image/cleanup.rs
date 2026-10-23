@@ -609,14 +609,17 @@ impl PreparedCleanup {
 
             // Simulate only the removals whose entries were claimed. This prevents busy
             // references from filling later batches with backing that cannot be removed.
+            let referenced_manifests: HashSet<_> = catalog
+                .references
+                .iter()
+                .filter(|(reference, _)| !claimed_references.contains(&reference.id))
+                .map(|(reference, _)| reference.manifest_id)
+                .collect();
             let mut claimed_manifests = HashSet::new();
             for manifest in &catalog.manifests {
                 if (selected.is_some() && !selected_manifests.contains(&manifest.id))
                     || catalog.retains(manifest)
-                    || catalog.references.iter().any(|(reference, _)| {
-                        reference.manifest_id == manifest.id
-                            && !claimed_references.contains(&reference.id)
-                    })
+                    || referenced_manifests.contains(&manifest.id)
                 {
                     continue;
                 }
