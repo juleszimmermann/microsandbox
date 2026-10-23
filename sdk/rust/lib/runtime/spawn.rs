@@ -98,7 +98,7 @@ use crate::{
         SandboxConfig, StatVirtualization, VolumeMount, validate_named_disk_mount_options,
     },
     volume::{
-        VolumeConfig, VolumeKind, lock_volume_name, materialize_volume_path,
+        VolumeConfig, VolumeKind, lock_volume_name, materialize_volume_path, provision_volume_path,
         validate_volume_config, validate_volume_name,
     },
 };
@@ -1755,7 +1755,19 @@ async fn ensure_named_volumes_inner(
             .await?;
 
         let path = local.volume_path(&volume_config.name);
-        if let Err(err) = materialize_volume_path(&volume_config, &path).await {
+        let materialized = if owner.is_some() {
+            // The journal prevents adoption until creation succeeds. Format at the owned
+            // path so a process crash cannot leave an untracked temporary sibling behind.
+            if path.exists() {
+                return Err(MicrosandboxError::VolumeAlreadyExists(
+                    volume_config.name.clone(),
+                ));
+            }
+            provision_volume_path(&volume_config, &path).await
+        } else {
+            materialize_volume_path(&volume_config, &path).await
+        };
+        if let Err(err) = materialized {
             let _ = volume_entity::Entity::delete_by_id(volume_id)
                 .exec(pools.write())
                 .await;
