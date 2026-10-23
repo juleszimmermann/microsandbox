@@ -4,6 +4,30 @@
 //! [`LocalBackend::create_sandbox`] is the single entry point; the trait
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
+//!
+//! # OCI image protection
+//!
+//! File leases and saved database ownership overlap; there must be no unprotected handoff:
+//!
+//! 1. The creator retains shared leases on cached image files while resolving and preparing them.
+//! 2. The `Starting` sandbox row and its image dependency commit in one transaction, before
+//!    the runtime is spawned. The creator still holds its leases during this commit.
+//! 3. Creation releases its operation leases when it finishes. The saved image dependency
+//!    continues to protect the backing files, including while the sandbox is stopped.
+//!
+//! Each concurrent creator retains its own leases. One creator finishing cannot release
+//! another's protection, even when readers within one process share an underlying file handle.
+//! OS file locks coordinate separate processes; prune skips leased files and rechecks saved
+//! dependencies before deletion. Database ownership is a durable record, not a database lock
+//! held for the sandbox's lifetime. The runtime need not retain these creation-time leases.
+//!
+//! # Crashes and cancellation
+//!
+//! Before the ownership transaction commits, no runtime has started; the transaction either
+//! commits or rolls back atomically. After commit, a creator or runtime panic, cancellation,
+//! or process exit does not by itself remove the saved image dependency. Releasing file
+//! leases therefore does not expose the backing to prune. Interrupted creation can leave
+//! a stale record retaining unused files until normal sandbox cleanup removes the dependency.
 
 #[cfg(all(test, unix))]
 mod archive_tests;

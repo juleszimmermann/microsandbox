@@ -4041,11 +4041,8 @@ async fn install_staged_cache(
             .map(|layer| layer.diff_id.parse())
             .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
             .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
-        // Keep the imported cache paths pinned while the blocking rewrite completes.
-        let rewrite_cache = cache.clone();
-        tokio::task::spawn_blocking(move || rewrite_cache.rewrite_vmdk(&pinned_digest, &diff_ids))
-            .await
-            .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
+        // Keep the imported cache paths pinned while the rewrite completes.
+        cache.rewrite_vmdk_async(&pinned_digest, &diff_ids).await?;
     }
     // The archive may describe an image already installed under this reference. Publish under
     // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
