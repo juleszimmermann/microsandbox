@@ -1085,8 +1085,6 @@ mod tests {
             "memory_allocation_node",
             "run",
             "sandbox",
-            "sandbox_creation",
-            "sandbox_creation_volume",
             "sandbox_labels",
             "sandbox_rootfs",
             "snapshot_artifact_migration",

@@ -44,6 +44,9 @@ impl RecoveryFixture {
         let config = SandboxBuilder::new("recoverable")
             .image(rootfs.canonicalize().unwrap())
             .ephemeral(true)
+            .volume("/data", |mount| {
+                mount.named_with("new", |volume| volume.ensure_exists())
+            })
             .build()
             .await
             .unwrap();
@@ -323,8 +326,12 @@ async fn cancelled_preparation_remains_fenced_until_its_worker_finishes() {
 }
 
 #[tokio::test]
-async fn prepared_image_labels_are_visible_to_label_filters() {
+async fn prepared_config_preserves_labels_and_caller_overrides() {
     let mut fixture = RecoveryFixture::new().await;
+    let mut overrides = crate::SandboxConfigPatch::new();
+    overrides.spec.runtime.cmd = Some(Vec::new());
+    fixture.config.caller_config_overrides = Some(Box::new(overrides));
+
     // This is the same late merge used by snapshot and archive restores.
     let mut image = microsandbox_image::ImageConfig::default();
     image.labels.insert("tier".into(), "web".into());
@@ -345,7 +352,21 @@ async fn prepared_image_labels_are_visible_to_label_filters() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
-    let saved: SandboxConfig = serde_json::from_str(&rows[0].0.config).unwrap();
+    let saved = SandboxConfig::from_stored(
+        &rows[0].0.config,
+        rows[0].0.caller_config_overrides.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved
+            .caller_config_overrides
+            .as_ref()
+            .unwrap()
+            .spec
+            .runtime
+            .cmd,
+        Some(Vec::new()),
+    );
     assert_eq!(
         saved.spec.labels.get("tier").map(String::as_str),
         Some("web")
@@ -381,7 +402,7 @@ async fn publication_and_recovery_retirement_commit_together() {
     );
     cleanup.begin_publication();
     pools.write().execute_unprepared(
-        "CREATE TRIGGER refuse_publication BEFORE DELETE ON sandbox_creation BEGIN SELECT RAISE(ABORT, 'test publication failure'); END;",
+        "CREATE TRIGGER refuse_publication BEFORE UPDATE OF pending_creation_sandbox_id ON volume WHEN OLD.pending_creation_sandbox_id IS NOT NULL AND NEW.pending_creation_sandbox_id IS NULL BEGIN SELECT RAISE(ABORT, 'test publication failure'); END;",
     ).await.unwrap();
     assert!(
         creation::complete(pools.write(), fixture.id, SandboxStatus::Running)
@@ -397,6 +418,11 @@ async fn publication_and_recovery_retirement_commit_together() {
     assert_eq!(row.status, SandboxStatus::Starting);
     assert!(!row.ephemeral);
     assert!(creation::pending(pools.read(), fixture.id).await.unwrap());
+    assert!(
+        crate::volume::get_local(fixture.local.clone(), "new")
+            .await
+            .is_err()
+    );
 
     pools
         .write()
@@ -420,4 +446,9 @@ async fn publication_and_recovery_retirement_commit_together() {
     assert_eq!(row.status, SandboxStatus::Running);
     assert!(row.ephemeral);
     assert!(!creation::pending(pools.read(), fixture.id).await.unwrap());
+    assert!(
+        crate::volume::get_local(fixture.local.clone(), "new")
+            .await
+            .is_ok()
+    );
 }

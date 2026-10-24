@@ -69,13 +69,13 @@ where
 /// Whether an unfinished create still owns this sandbox.
 pub(crate) async fn pending<C: ConnectionTrait>(db: &C, id: i32) -> MicrosandboxResult<bool> {
     // Runtime processes may operate an older catalog without applying SDK migrations.
-    if !microsandbox_db::catalog::has_table(db, "sandbox_creation").await? {
+    if !microsandbox_db::catalog::has_column(db, "sandbox", "creation_state").await? {
         return Ok(false);
     }
     Ok(db
         .query_one_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            "SELECT sandbox_id FROM sandbox_creation WHERE sandbox_id = ?",
+            "SELECT id FROM sandbox WHERE id = ? AND creation_state IS NOT NULL",
             [id.into()],
         ))
         .await?
@@ -102,12 +102,12 @@ pub(crate) async fn require_volume_available<C: ConnectionTrait>(
     volume_id: i32,
     creator: Option<&str>,
 ) -> MicrosandboxResult<()> {
-    if !microsandbox_db::catalog::has_table(db, "sandbox_creation_volume").await? {
+    if !microsandbox_db::catalog::has_column(db, "volume", "pending_creation_sandbox_id").await? {
         return Ok(());
     }
     let row = db.query_one_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
-        "SELECT sandbox.name FROM sandbox_creation_volume AS owned JOIN sandbox ON sandbox.id = owned.sandbox_id WHERE owned.volume_id = ?",
+        "SELECT sandbox.name FROM volume JOIN sandbox ON sandbox.id = volume.pending_creation_sandbox_id WHERE volume.id = ?",
         [volume_id.into()],
     )).await?;
     if let Some(row) = row {
@@ -143,7 +143,7 @@ pub(crate) async fn complete(
         };
         let updated = txn.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            format!("UPDATE sandbox SET status = ?, ephemeral = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND {expected}"),
+            format!("UPDATE sandbox SET status = ?, ephemeral = ?, creation_state = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND creation_state IS NOT NULL AND {expected}"),
             [status.into(), config.spec.lifecycle.ephemeral.into(), id.into()],
         )).await?;
         if updated.rows_affected() != 1 {
@@ -153,7 +153,7 @@ pub(crate) async fn complete(
         }
         txn.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
-            "DELETE FROM sandbox_creation WHERE sandbox_id = ?",
+            "UPDATE volume SET pending_creation_sandbox_id = NULL WHERE pending_creation_sandbox_id = ?",
             [id.into()],
         )).await?;
         Ok::<_, MicrosandboxError>((txn, ()))
@@ -166,7 +166,7 @@ pub(crate) async fn complete(
 pub(crate) async fn can_retain(db: &DbWriteConnection, id: i32) -> MicrosandboxResult<bool> {
     Ok(db.query_one_raw(Statement::from_sql_and_values(
         DatabaseBackend::Sqlite,
-        "SELECT sandbox_id FROM sandbox_creation WHERE sandbox_id = ? AND prepared = 1 AND NOT EXISTS (SELECT 1 FROM sandbox_creation_volume WHERE sandbox_id = ?)",
+        "SELECT id FROM sandbox WHERE id = ? AND creation_state = 'prepared' AND NOT EXISTS (SELECT 1 FROM volume WHERE pending_creation_sandbox_id = ?)",
         [id.into(), id.into()],
     )).await?.is_some())
 }
@@ -184,11 +184,14 @@ pub(crate) async fn remove(
     let pools = local.db().await?;
     let _preparation = lock_preparation(local, name)?;
 
-    let rows = pools.write().query_all_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Sqlite,
-        "SELECT volume.id, volume.name FROM sandbox_creation_volume AS owned JOIN volume ON volume.id = owned.volume_id WHERE owned.sandbox_id = ? ORDER BY volume.name",
-        [id.into()],
-    )).await?;
+    let rows = pools
+        .write()
+        .query_all_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "SELECT id, name FROM volume WHERE pending_creation_sandbox_id = ? ORDER BY name",
+            [id.into()],
+        ))
+        .await?;
     let mut locks = Vec::new();
     let mut volumes = Vec::new();
     for row in rows {
@@ -215,7 +218,7 @@ pub(crate) async fn remove(
             async move {
                 txn.execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Sqlite,
-                    "DELETE FROM sandbox_creation WHERE sandbox_id = ?",
+                    "UPDATE volume SET pending_creation_sandbox_id = NULL WHERE pending_creation_sandbox_id = ?",
                     [id.into()],
                 ))
                 .await?;
@@ -227,6 +230,12 @@ pub(crate) async fn remove(
                     ))
                     .await?;
                 }
+                txn.execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE sandbox SET creation_state = NULL WHERE id = ? AND name = ?",
+                    [id.into(), name.into()],
+                ))
+                .await?;
                 txn.execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Sqlite,
                     "DELETE FROM sandbox WHERE id = ? AND name = ?",

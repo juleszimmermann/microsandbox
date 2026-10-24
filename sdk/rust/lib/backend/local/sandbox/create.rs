@@ -2047,11 +2047,17 @@ impl LocalBackend {
     ) -> MicrosandboxResult<()> {
         launch_contract::validate_runtime_config(config, self.config()).await?;
         let config_json = serde_json::to_string(config)?;
+        let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
         db.transaction(|txn| {
             let config_json = config_json.clone();
+            let caller_config_overrides_json = caller_config_overrides_json.clone();
             async move {
                 sandbox_entity::Entity::update_many()
                     .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
+                    .col_expr(
+                        sandbox_entity::Column::CallerConfigOverrides,
+                        Expr::value(caller_config_overrides_json),
+                    )
                     .col_expr(
                         sandbox_entity::Column::Status,
                         Expr::value(SandboxStatus::Starting),
@@ -2081,7 +2087,7 @@ impl LocalBackend {
                 }
                 txn.execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Sqlite,
-                    "UPDATE sandbox_creation SET prepared = 1 WHERE sandbox_id = ?",
+                    "UPDATE sandbox SET creation_state = 'prepared' WHERE id = ? AND creation_state = 'preparing'",
                     [id.into()],
                 ))
                 .await?;
@@ -2177,8 +2183,8 @@ impl LocalBackend {
                 if reserve {
                     txn.execute_raw(Statement::from_sql_and_values(
                         DatabaseBackend::Sqlite,
-                        "INSERT INTO sandbox_creation (sandbox_id, owner_pid) VALUES (?, ?)",
-                        [sandbox_id.into(), (std::process::id() as i32).into()],
+                        "UPDATE sandbox SET creation_state = 'preparing' WHERE id = ?",
+                        [sandbox_id.into()],
                     ))
                     .await?;
                 }

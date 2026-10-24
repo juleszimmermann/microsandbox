@@ -68,7 +68,7 @@ pub const SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID: &str =
     "m20261022_000001_sandbox_caller_config_overrides";
 
 /// Migration that retains ownership of unfinished sandbox creation.
-pub const SANDBOX_CREATION_MIGRATION_ID: &str = "m20261023_000001_sandbox_creation";
+pub const SANDBOX_CREATION_MIGRATION_ID: &str = "m20261024_000001_sandbox_creation";
 
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
@@ -314,7 +314,7 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         reversible: true,
         affects_cache: false,
         affects_user_data: true,
-        summary: "remove creation recovery tables only when no incomplete creates remain",
+        summary: "remove creation recovery columns only when no incomplete creates remain",
     },
 ];
 

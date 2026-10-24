@@ -1725,9 +1725,7 @@ async fn ensure_named_volumes_inner(
             .write()
             .query_one_raw(Statement::from_sql_and_values(
                 DatabaseBackend::Sqlite,
-                "SELECT sandbox.id FROM sandbox \
-            JOIN sandbox_creation ON sandbox.id = sandbox_creation.sandbox_id \
-            WHERE sandbox.name = ?",
+                "SELECT id FROM sandbox WHERE name = ? AND creation_state IS NOT NULL",
                 [config.spec.name.clone().into()],
             ))
             .await?
@@ -1744,10 +1742,11 @@ async fn ensure_named_volumes_inner(
                     let volume_id = inserted.last_insert_id;
                     if let Some(owner) = owner {
                         txn.execute_raw(Statement::from_sql_and_values(
-                        DatabaseBackend::Sqlite,
-                        "INSERT INTO sandbox_creation_volume (volume_id, sandbox_id) VALUES (?, ?)",
-                        [volume_id.into(), owner.into()],
-                    )).await?;
+                            DatabaseBackend::Sqlite,
+                            "UPDATE volume SET pending_creation_sandbox_id = ? WHERE id = ?",
+                            [owner.into(), volume_id.into()],
+                        ))
+                        .await?;
                     }
                     Ok::<_, MicrosandboxError>((txn, volume_id))
                 }
