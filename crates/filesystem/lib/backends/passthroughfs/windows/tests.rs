@@ -875,6 +875,35 @@ fn host_move_into_recreated_parent_path_repairs_once() {
 }
 
 #[test]
+fn host_move_up_to_former_parent_path_moves_children() {
+    // Host: `parent/child` -> `temp`; guest removes the empty `parent`;
+    // host: `temp` -> `parent`. The new location is an ancestor of the old.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("parent/child")).unwrap();
+    std::fs::write(temp.path.join("parent/child/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let parent = fs.lookup(context(), ROOT_INODE, c"parent").unwrap();
+    let child = fs.lookup(context(), parent.inode, c"child").unwrap();
+    let file = fs.lookup(context(), child.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("parent/child"), temp.path.join("temp")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"parent").unwrap();
+    std::fs::rename(temp.path.join("temp"), temp.path.join("parent")).unwrap();
+
+    let moved = fs.lookup(context(), ROOT_INODE, c"parent").unwrap();
+    assert_eq!(moved.inode, child.inode);
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    let (handle, _) = fs.open(context(), file.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, file.inode, handle), b"abc");
+    fs.release(context(), file.inode, 0, handle, false, false, None)
+        .unwrap();
+    let again = fs.lookup(context(), moved.inode, c"file.txt").unwrap();
+    assert_eq!(again.inode, file.inode);
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();

@@ -263,16 +263,19 @@ impl PassthroughFs {
     /// A directory renamed on the host takes its cached descendants along:
     /// aliases under `old` move under `new`, and so do canonical paths, as
     /// `rename_inode_path` does for guest-side renames. Live entries already
-    /// cached under `new` are kept. When `new` lies beneath `old` (host moved
-    /// the directory into a recreated `old`), names under `new` are already
-    /// live and the repaired directory itself is never moved again.
+    /// cached under `new` are kept. The repaired directory itself is never
+    /// moved again; when `new` lies beneath `old` (moved into a recreated
+    /// `old`), names already under `new` are live and left alone. When `new`
+    /// is an ancestor of `old` (moved up), every cached child still moves.
     fn follow_host_rename_descendants(
         inodes: &mut InodeTable,
         repaired: &Arc<InodeData>,
         old: &Path,
         new: &Path,
     ) {
-        let stale = |p: &Path| p != old && p.starts_with(old) && !p.starts_with(new);
+        let new_below_old = new.starts_with(old);
+        let stale =
+            |p: &Path| p != old && p.starts_with(old) && !(new_below_old && p.starts_with(new));
         let moved = inodes
             .by_path
             .range(old.to_path_buf()..)
