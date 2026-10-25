@@ -828,6 +828,53 @@ fn host_directory_rename_moves_cached_descendants() {
 }
 
 #[test]
+fn host_move_into_recreated_parent_path_repairs_once() {
+    // Host: `dir` -> `temp`, new `dir`, `temp` -> `dir/moved`. The new
+    // location lies beneath the old path: the repair must not apply twice.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("dir/nested")).unwrap();
+    std::fs::write(temp.path.join("dir/nested/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    let nested = fs.lookup(context(), dir.inode, c"nested").unwrap();
+    let file = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("dir"), temp.path.join("temp")).unwrap();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::rename(temp.path.join("temp"), temp.path.join("dir/moved")).unwrap();
+
+    let moved = fs.lookup(context(), dir.inode, c"moved").unwrap();
+    assert_eq!(moved.inode, dir.inode);
+    // Repaired once: `…\dir\moved`, not `…\dir\moved\moved`.
+    let tail = |inode: u64| {
+        let path = fs.inode(inode).unwrap().path();
+        let parts: Vec<String> = path
+            .components()
+            .rev()
+            .take(4)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        parts.into_iter().rev().collect::<Vec<_>>().join("/")
+    };
+    assert!(
+        tail(dir.inode).ends_with("/dir/moved"),
+        "{}",
+        tail(dir.inode)
+    );
+    assert_eq!(tail(file.inode), "dir/moved/nested/file.txt");
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(moved.inode)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"nested".to_vec()), "{names:?}");
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    fs.getattr(context(), moved.inode, None).unwrap();
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();

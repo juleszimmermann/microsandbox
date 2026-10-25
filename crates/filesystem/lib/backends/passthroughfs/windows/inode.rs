@@ -257,19 +257,27 @@ impl PassthroughFs {
             inodes.by_path.remove(&canonical);
         }
         *data.path.write().unwrap() = path.to_path_buf();
-        Self::follow_host_rename_descendants(inodes, &canonical, path);
+        Self::follow_host_rename_descendants(inodes, data, &canonical, path);
     }
 
     /// A directory renamed on the host takes its cached descendants along:
     /// aliases under `old` move under `new`, and so do canonical paths, as
     /// `rename_inode_path` does for guest-side renames. Live entries already
-    /// cached under `new` are kept.
-    fn follow_host_rename_descendants(inodes: &mut InodeTable, old: &Path, new: &Path) {
+    /// cached under `new` are kept. When `new` lies beneath `old` (host moved
+    /// the directory into a recreated `old`), names under `new` are already
+    /// live and the repaired directory itself is never moved again.
+    fn follow_host_rename_descendants(
+        inodes: &mut InodeTable,
+        repaired: &Arc<InodeData>,
+        old: &Path,
+        new: &Path,
+    ) {
+        let stale = |p: &Path| p != old && p.starts_with(old) && !p.starts_with(new);
         let moved = inodes
             .by_path
             .range(old.to_path_buf()..)
             .take_while(|(p, _)| p.starts_with(old))
-            .filter(|(p, _)| p.as_path() != old)
+            .filter(|(p, d)| stale(p) && !Arc::ptr_eq(d, repaired))
             .map(|(p, d)| (p.clone(), d.clone()))
             .collect::<Vec<_>>();
         for (path, data) in moved {
@@ -278,10 +286,12 @@ impl PassthroughFs {
             inodes.by_path.entry(target).or_insert(data);
         }
         for data in inodes.by_inode.values() {
+            if Arc::ptr_eq(data, repaired) {
+                continue;
+            }
             let canonical = data.path();
-            if canonical != old
-                && let Ok(rest) = canonical.strip_prefix(old)
-            {
+            if stale(&canonical) {
+                let rest = canonical.strip_prefix(old).expect("selected descendant");
                 *data.path.write().unwrap() = new.join(rest);
             }
         }
