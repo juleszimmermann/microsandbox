@@ -257,45 +257,62 @@ impl PassthroughFs {
             inodes.by_path.remove(&canonical);
         }
         *data.path.write().unwrap() = path.to_path_buf();
-        Self::follow_host_rename_descendants(inodes, data, &canonical, path);
+        Self::follow_host_rename_descendants(inodes, data, &canonical, path, &identity_of);
     }
 
     /// A directory renamed on the host takes its cached descendants along:
-    /// aliases under `old` move under `new`, and so do canonical paths, as
-    /// `rename_inode_path` does for guest-side renames. Live entries already
-    /// cached under `new` are kept. The repaired directory itself is never
-    /// moved again; when `new` lies beneath `old` (moved into a recreated
-    /// `old`), names already under `new` are live and left alone. When `new`
-    /// is an ancestor of `old` (moved up), every cached child still moves.
+    /// each alias and canonical path under `old` is rewritten under `new`, as
+    /// `rename_inode_path` does for guest-side renames, but only when the host
+    /// confirms the same object now lives at the rewritten path. Entries that
+    /// fail the check stay put: they belong to whatever now occupies `old`
+    /// (cached through the stale directory inode before this repair), or the
+    /// object is gone. The repaired directory and its new alias are skipped.
+    /// Identity checks run only for entries under `old`, on this rare path.
     fn follow_host_rename_descendants(
         inodes: &mut InodeTable,
         repaired: &Arc<InodeData>,
         old: &Path,
         new: &Path,
+        identity_of: &impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
     ) {
-        let new_below_old = new.starts_with(old);
-        let stale =
-            |p: &Path| p != old && p.starts_with(old) && !(new_below_old && p.starts_with(new));
+        let rewritten = |p: &Path| -> Option<PathBuf> {
+            if p == old {
+                return None;
+            }
+            p.strip_prefix(old).ok().map(|rest| new.join(rest))
+        };
+        // Without a file identity there is nothing to check: follow the move.
+        let live_at = |data: &InodeData, target: &Path| match data.identity {
+            Some(id) => identity_of(target).ok().flatten() == Some(id),
+            None => true,
+        };
         let moved = inodes
             .by_path
             .range(old.to_path_buf()..)
             .take_while(|(p, _)| p.starts_with(old))
-            .filter(|(p, d)| stale(p) && !Arc::ptr_eq(d, repaired))
-            .map(|(p, d)| (p.clone(), d.clone()))
+            .filter(|(_, d)| !Arc::ptr_eq(d, repaired))
+            .filter_map(|(p, d)| {
+                let target = rewritten(p)?;
+                live_at(d, &target).then(|| (p.clone(), target, d.clone()))
+            })
             .collect::<Vec<_>>();
-        for (path, data) in moved {
-            inodes.by_path.remove(&path);
-            let target = new.join(path.strip_prefix(old).expect("selected descendant"));
-            inodes.by_path.entry(target).or_insert(data);
+        // All sources out before any insert: on an upward move a target can be
+        // another source's key (`p/c/c/f` -> `p/c/f`). A target held by a
+        // non-source entry is stale, since the host now has this object there.
+        for (source, _, _) in &moved {
+            inodes.by_path.remove(source);
+        }
+        for (_, target, data) in moved {
+            inodes.by_path.insert(target, data);
         }
         for data in inodes.by_inode.values() {
             if Arc::ptr_eq(data, repaired) {
                 continue;
             }
-            let canonical = data.path();
-            if stale(&canonical) {
-                let rest = canonical.strip_prefix(old).expect("selected descendant");
-                *data.path.write().unwrap() = new.join(rest);
+            if let Some(target) = rewritten(&data.path())
+                && live_at(data, &target)
+            {
+                *data.path.write().unwrap() = target;
             }
         }
     }
