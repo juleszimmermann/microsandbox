@@ -1,9 +1,11 @@
 #[cfg(unix)]
 use std::ffi::CString;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
